@@ -366,6 +366,8 @@ HTML = r"""<!doctype html>
   document.getElementById('fast').addEventListener('click', () => setMaxMag(0.90));
 
   // Poll status so you can tell when deadman has fired.
+  // Keep this fairly low-frequency to avoid extra load.
+  const STATUS_POLL_MS = 1500;
   setInterval(async () => {
     try {
       const res = await fetch('/api/status' + location.search);
@@ -381,7 +383,7 @@ HTML = r"""<!doctype html>
     } catch (_) {
       setSafety(false, 'Deadman: ?');
     }
-  }, 250);
+  }, STATUS_POLL_MS);
 
   // Initial ping
   send(0, 0);
