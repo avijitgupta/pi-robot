@@ -168,6 +168,14 @@ HTML = r"""<!doctype html>
           <button id="med">Max 60%</button>
           <button id="fast">Max 90%</button>
         </div>
+
+        <div class="muted" style="margin-top:10px;">Hold buttons to drive (sends continuously while pressed):</div>
+        <div class="btnRow" style="margin-top:8px;">
+          <button id="fwd" class="hold">FWD</button>
+          <button id="left" class="hold">LEFT</button>
+          <button id="right" class="hold">RIGHT</button>
+          <button id="rev" class="hold">REV</button>
+        </div>
       </div>
 
       <div class="card grow">
@@ -197,6 +205,9 @@ HTML = r"""<!doctype html>
 
   let maxMag = 0.6;
   let active = false;
+  let sendTimer = null;
+  let desiredThrottle = 0;
+  let desiredSteering = 0;
   let lastSend = 0;
   let sentCount = 0;
   let lastHzTs = performance.now();
@@ -234,11 +245,27 @@ HTML = r"""<!doctype html>
   }
 
   async function stop() {
+    active = false;
+    if (sendTimer) {
+      clearInterval(sendTimer);
+      sendTimer = null;
+    }
+    desiredThrottle = 0;
+    desiredSteering = 0;
     knob.style.left = '50%';
     knob.style.top = '50%';
     try {
       await fetch('/api/stop' + location.search, { method: 'POST' });
     } catch (_) {}
+  }
+
+  function ensureSendLoop() {
+    if (sendTimer) return;
+    // Keep sending while active to satisfy deadman.
+    sendTimer = setInterval(() => {
+      if (!active) return;
+      send(desiredThrottle, desiredSteering);
+    }, 50);
   }
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -258,15 +285,39 @@ HTML = r"""<!doctype html>
     const steering = nx * maxMag;
     const throttle = (-ny) * maxMag;
 
+    desiredThrottle = throttle;
+    desiredSteering = steering;
+
     knob.style.left = (50 + nx * 40) + '%';
     knob.style.top = (50 + ny * 40) + '%';
 
-    send(throttle, steering);
+    ensureSendLoop();
+    send(desiredThrottle, desiredSteering);
+  }
+
+  function startHold(throttle, steering) {
+    active = true;
+    desiredThrottle = throttle;
+    desiredSteering = steering;
+    ensureSendLoop();
+    send(desiredThrottle, desiredSteering);
+  }
+
+  function bindHoldButton(el, throttle, steering) {
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+      startHold(throttle, steering);
+    });
+    el.addEventListener('pointerup', stop);
+    el.addEventListener('pointercancel', stop);
+    el.addEventListener('pointerleave', () => { if (active) stop(); });
   }
 
   joy.addEventListener('pointerdown', (e) => {
     active = true;
     joy.setPointerCapture(e.pointerId);
+    ensureSendLoop();
     handlePoint(e.clientX, e.clientY);
   });
 
@@ -275,20 +326,31 @@ HTML = r"""<!doctype html>
     handlePoint(e.clientX, e.clientY);
   });
 
-  joy.addEventListener('pointerup', async () => {
-    active = false;
-    await stop();
-  });
-
-  joy.addEventListener('pointercancel', async () => {
-    active = false;
-    await stop();
-  });
+  joy.addEventListener('pointerup', stop);
+  joy.addEventListener('pointercancel', stop);
 
   document.getElementById('stop').addEventListener('click', stop);
   document.getElementById('slow').addEventListener('click', () => maxMag = 0.30);
   document.getElementById('med').addEventListener('click', () => maxMag = 0.60);
   document.getElementById('fast').addEventListener('click', () => maxMag = 0.90);
+
+  bindHoldButton(document.getElementById('fwd'),  maxMag, 0.0);
+  bindHoldButton(document.getElementById('rev'), -maxMag, 0.0);
+  bindHoldButton(document.getElementById('left'), 0.0, -maxMag);
+  bindHoldButton(document.getElementById('right'),0.0,  maxMag);
+
+  // If maxMag changes via buttons, keep hold buttons in sync.
+  const setMaxMag = (v) => {
+    maxMag = v;
+    if (active) {
+      // Preserve direction but clamp to new magnitude.
+      desiredThrottle = Math.max(-maxMag, Math.min(maxMag, desiredThrottle));
+      desiredSteering = Math.max(-maxMag, Math.min(maxMag, desiredSteering));
+    }
+  };
+  document.getElementById('slow').addEventListener('click', () => setMaxMag(0.30));
+  document.getElementById('med').addEventListener('click', () => setMaxMag(0.60));
+  document.getElementById('fast').addEventListener('click', () => setMaxMag(0.90));
 
   // Initial ping
   send(0, 0);
