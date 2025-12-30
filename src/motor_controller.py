@@ -15,6 +15,7 @@ Typical usage:
 from __future__ import annotations
 
 import os
+import time
 
 from gpiozero import PWMOutputDevice, DigitalOutputDevice
 
@@ -44,6 +45,7 @@ class MotorController:
         left_mult: float = 1.0,
         right_mult: float = 0.87,
         max_pwm: float = 1.0,
+        slew_rate: float = 6.0,
     ):
         self.stby = DigitalOutputDevice(STBY)
         self.left_pwm = PWMOutputDevice(PWMA, frequency=pwm_freq_hz)
@@ -56,6 +58,11 @@ class MotorController:
         self.left_mult = float(left_mult)
         self.right_mult = float(right_mult)
         self.max_pwm = float(max_pwm)
+        self.slew_rate = float(slew_rate)
+
+        self._last_left = 0.0
+        self._last_right = 0.0
+        self._last_ts = time.monotonic()
 
         self.enable()
         self.stop()
@@ -73,10 +80,21 @@ class MotorController:
         self.right_pwm.value = 0
         self.right_in1.off()
         self.right_in2.off()
+        self._last_left = 0.0
+        self._last_right = 0.0
+        self._last_ts = time.monotonic()
 
     @staticmethod
     def _clamp(v: float, lo: float, hi: float) -> float:
         return lo if v < lo else hi if v > hi else v
+
+    @staticmethod
+    def _approach(current: float, target: float, max_delta: float) -> float:
+        if max_delta <= 0:
+            return target
+        if target > current:
+            return min(target, current + max_delta)
+        return max(target, current - max_delta)
 
     def _apply_motor(self, pwm: PWMOutputDevice, in1: DigitalOutputDevice, in2: DigitalOutputDevice, value: float):
         value = self._clamp(value, -self.max_pwm, self.max_pwm)
@@ -112,6 +130,16 @@ class MotorController:
 
         left *= self.left_mult
         right *= self.right_mult
+
+        if self.slew_rate > 0:
+            now = time.monotonic()
+            dt = max(now - self._last_ts, 0.0)
+            max_delta = self.slew_rate * dt
+            left = self._approach(self._last_left, left, max_delta)
+            right = self._approach(self._last_right, right, max_delta)
+            self._last_left = left
+            self._last_right = right
+            self._last_ts = now
 
         self._apply_motor(self.left_pwm, self.left_in1, self.left_in2, left)
         self._apply_motor(self.right_pwm, self.right_in1, self.right_in2, right)

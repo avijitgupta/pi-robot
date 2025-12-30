@@ -154,6 +154,7 @@ HTML = r"""<!doctype html>
         <div class="muted">Touch + drag the pad. Release to stop. Keep this page open while driving.</div>
         <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
           <span id="status" class="pill">Connecting…</span>
+          <span id="safety" class="pill">Deadman…</span>
           <span class="pill">Update: <span id="hz">0</span> Hz</span>
         </div>
         <div class="joyWrap" style="margin-top: 14px;">
@@ -201,10 +202,12 @@ HTML = r"""<!doctype html>
   const joy = document.getElementById('joy');
   const knob = document.getElementById('knob');
   const status = document.getElementById('status');
+  const safety = document.getElementById('safety');
   const hzEl = document.getElementById('hz');
 
   let maxMag = 0.6;
   let active = false;
+  let holdMode = false;
   let sendTimer = null;
   let desiredThrottle = 0;
   let desiredSteering = 0;
@@ -215,6 +218,11 @@ HTML = r"""<!doctype html>
   function setStatus(ok, text) {
     status.textContent = text;
     status.className = ok ? 'pill ok' : 'pill bad';
+  }
+
+  function setSafety(ok, text) {
+    safety.textContent = text;
+    safety.className = ok ? 'pill ok' : 'pill bad';
   }
 
   async function send(throttle, steering) {
@@ -246,6 +254,7 @@ HTML = r"""<!doctype html>
 
   async function stop() {
     active = false;
+    holdMode = false;
     if (sendTimer) {
       clearInterval(sendTimer);
       sendTimer = null;
@@ -271,6 +280,7 @@ HTML = r"""<!doctype html>
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
   function handlePoint(clientX, clientY) {
+    holdMode = false;
     const rect = joy.getBoundingClientRect();
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
@@ -297,17 +307,18 @@ HTML = r"""<!doctype html>
 
   function startHold(throttle, steering) {
     active = true;
+    holdMode = true;
     desiredThrottle = throttle;
     desiredSteering = steering;
     ensureSendLoop();
     send(desiredThrottle, desiredSteering);
   }
 
-  function bindHoldButton(el, throttle, steering) {
+  function bindHoldButton(el, throttleSign, steeringSign) {
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       el.setPointerCapture(e.pointerId);
-      startHold(throttle, steering);
+      startHold(throttleSign * maxMag, steeringSign * maxMag);
     });
     el.addEventListener('pointerup', stop);
     el.addEventListener('pointercancel', stop);
@@ -330,27 +341,47 @@ HTML = r"""<!doctype html>
   joy.addEventListener('pointercancel', stop);
 
   document.getElementById('stop').addEventListener('click', stop);
-  document.getElementById('slow').addEventListener('click', () => maxMag = 0.30);
-  document.getElementById('med').addEventListener('click', () => maxMag = 0.60);
-  document.getElementById('fast').addEventListener('click', () => maxMag = 0.90);
 
-  bindHoldButton(document.getElementById('fwd'),  maxMag, 0.0);
-  bindHoldButton(document.getElementById('rev'), -maxMag, 0.0);
-  bindHoldButton(document.getElementById('left'), 0.0, -maxMag);
-  bindHoldButton(document.getElementById('right'),0.0,  maxMag);
+  bindHoldButton(document.getElementById('fwd'),  1.0,  0.0);
+  bindHoldButton(document.getElementById('rev'), -1.0,  0.0);
+  bindHoldButton(document.getElementById('left'), 0.0, -1.0);
+  bindHoldButton(document.getElementById('right'),0.0,  1.0);
 
   // If maxMag changes via buttons, keep hold buttons in sync.
   const setMaxMag = (v) => {
     maxMag = v;
     if (active) {
-      // Preserve direction but clamp to new magnitude.
-      desiredThrottle = Math.max(-maxMag, Math.min(maxMag, desiredThrottle));
-      desiredSteering = Math.max(-maxMag, Math.min(maxMag, desiredSteering));
+      if (holdMode) {
+        desiredThrottle = Math.sign(desiredThrottle) * maxMag;
+        desiredSteering = Math.sign(desiredSteering) * maxMag;
+      } else {
+        // Preserve joystick direction but clamp to new magnitude.
+        desiredThrottle = Math.max(-maxMag, Math.min(maxMag, desiredThrottle));
+        desiredSteering = Math.max(-maxMag, Math.min(maxMag, desiredSteering));
+      }
     }
   };
   document.getElementById('slow').addEventListener('click', () => setMaxMag(0.30));
   document.getElementById('med').addEventListener('click', () => setMaxMag(0.60));
   document.getElementById('fast').addEventListener('click', () => setMaxMag(0.90));
+
+  // Poll status so you can tell when deadman has fired.
+  setInterval(async () => {
+    try {
+      const res = await fetch('/api/status' + location.search);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const s = await res.json();
+      if (s.last_cmd_age_s == null) {
+        setSafety(false, 'Deadman: idle');
+      } else if (s.last_cmd_age_s > s.deadman_s) {
+        setSafety(false, 'Deadman: STOPPED');
+      } else {
+        setSafety(true, 'Deadman: OK');
+      }
+    } catch (_) {
+      setSafety(false, 'Deadman: ?');
+    }
+  }, 250);
 
   // Initial ping
   send(0, 0);
