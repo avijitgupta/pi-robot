@@ -15,7 +15,9 @@ Requires:
 
 from __future__ import annotations
 
+import atexit
 import os
+import signal
 import time
 from threading import Lock
 
@@ -65,6 +67,26 @@ LEFT_MULT = _env_float("LEFT_MULT", 1.0)
 RIGHT_MULT = _env_float("RIGHT_MULT", 0.87)
 
 controller = MotorController(left_mult=LEFT_MULT, right_mult=RIGHT_MULT, max_pwm=MAX_PWM)
+
+
+def _safe_shutdown():
+  try:
+    controller.stop()
+  except Exception:
+    pass
+  try:
+    controller.disable()
+  except Exception:
+    pass
+
+
+atexit.register(_safe_shutdown)
+
+
+def _handle_sigterm(_signum, _frame):
+  # Ensure we stop/disable before exiting on service shutdown.
+  _safe_shutdown()
+  raise SystemExit(0)
 
 
 HTML = r"""<!doctype html>
@@ -344,6 +366,12 @@ def _deadman_loop():
 def main():
     import threading
 
+  try:
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+  except Exception:
+    # Not all platforms support SIGTERM/signal handling the same way.
+    pass
+
     threading.Thread(target=_deadman_loop, daemon=True).start()
 
     host = os.environ.get("HOST", "0.0.0.0")
@@ -354,7 +382,10 @@ def main():
     if os.environ.get("TELEOP_TOKEN"):
         print("Token enabled: append ?token=... to the URL")
 
-    app.run(host=host, port=port, threaded=True)
+    try:
+      app.run(host=host, port=port, threaded=True)
+    finally:
+      _safe_shutdown()
 
 
 if __name__ == "__main__":
