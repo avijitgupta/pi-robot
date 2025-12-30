@@ -70,23 +70,23 @@ controller = MotorController(left_mult=LEFT_MULT, right_mult=RIGHT_MULT, max_pwm
 
 
 def _safe_shutdown():
-  try:
-    controller.stop()
-  except Exception:
-    pass
-  try:
-    controller.disable()
-  except Exception:
-    pass
+    try:
+        controller.stop()
+    except Exception:
+        pass
+    try:
+        controller.disable()
+    except Exception:
+        pass
 
 
 atexit.register(_safe_shutdown)
 
 
 def _handle_sigterm(_signum, _frame):
-  # Ensure we stop/disable before exiting on service shutdown.
-  _safe_shutdown()
-  raise SystemExit(0)
+    # Ensure we stop/disable before exiting on service shutdown.
+    _safe_shutdown()
+    raise SystemExit(0)
 
 
 HTML = r"""<!doctype html>
@@ -366,11 +366,11 @@ def _deadman_loop():
 def main():
     import threading
 
-  try:
-    signal.signal(signal.SIGTERM, _handle_sigterm)
-  except Exception:
-    # Not all platforms support SIGTERM/signal handling the same way.
-    pass
+    try:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+    except Exception:
+        # Not all platforms support SIGTERM/signal handling the same way.
+        pass
 
     threading.Thread(target=_deadman_loop, daemon=True).start()
 
@@ -383,9 +383,9 @@ def main():
         print("Token enabled: append ?token=... to the URL")
 
     try:
-      app.run(host=host, port=port, threaded=True)
+        app.run(host=host, port=port, threaded=True)
     finally:
-      _safe_shutdown()
+        _safe_shutdown()
 
 
 if __name__ == "__main__":
