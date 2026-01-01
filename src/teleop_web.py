@@ -19,10 +19,11 @@ import atexit
 import os
 import signal
 import time
-from threading import Lock
+from threading import Event, Lock
 
 from flask import Flask, Response, jsonify, request, render_template_string
 
+from autonomous_vl53l0x import AutoAvoidRunner
 from motor_controller import MotorController
 
 
@@ -59,6 +60,15 @@ _state_lock = Lock()
 _last_cmd_ts = 0.0
 _last_throttle = 0.0
 _last_steering = 0.0
+_mode = "joystick"  # joystick | selfdrive
+
+# Self-drive state
+_sd_lock = Lock()
+_sd_stop_event: Event | None = None
+_sd_thread = None
+_sd_running = False
+_sd_last_mm: int | None = None
+_sd_last_state: str | None = None
 
 # Safety / tuning
 DEADMAN_S = _env_float("DEADMAN_S", 0.35)
@@ -69,7 +79,74 @@ RIGHT_MULT = _env_float("RIGHT_MULT", 0.87)
 controller = MotorController(left_mult=LEFT_MULT, right_mult=RIGHT_MULT, max_pwm=MAX_PWM)
 
 
+def _heartbeat_cmd(throttle: float = 0.0, steering: float = 0.0):
+  global _last_cmd_ts, _last_throttle, _last_steering
+  with _state_lock:
+    _last_cmd_ts = time.time()
+    _last_throttle = float(throttle)
+    _last_steering = float(steering)
+
+
+def _stop_selfdrive(*, join_timeout_s: float = 1.5):
+  global _sd_stop_event, _sd_thread, _sd_running
+
+  with _sd_lock:
+    ev = _sd_stop_event
+    thr = _sd_thread
+    _sd_stop_event = None
+    _sd_thread = None
+    _sd_running = False
+
+  if ev is not None:
+    ev.set()
+  if thr is not None:
+    try:
+      thr.join(timeout=join_timeout_s)
+    except Exception:
+      pass
+
+
+def _start_selfdrive():
+  global _sd_stop_event, _sd_thread, _sd_running
+  import threading
+
+  with _sd_lock:
+    if _sd_running:
+      return
+
+    _sd_stop_event = Event()
+    stop_event = _sd_stop_event
+
+    def on_status(s: dict):
+      global _sd_last_mm, _sd_last_state
+      try:
+        _sd_last_mm = s.get("mm")
+        _sd_last_state = s.get("state")
+      except Exception:
+        pass
+
+    def run():
+      global _sd_running
+      _sd_running = True
+      try:
+        runner = AutoAvoidRunner(controller)
+        runner.run(
+          stop_event,
+          heartbeat=_heartbeat_cmd,
+          on_status=on_status,
+        )
+      finally:
+        _sd_running = False
+
+    _sd_thread = threading.Thread(target=run, daemon=True)
+    _sd_thread.start()
+
+
 def _safe_shutdown():
+  try:
+    _stop_selfdrive()
+  except Exception:
+    pass
     try:
         controller.stop()
     except Exception:
@@ -107,6 +184,8 @@ HTML = r"""<!doctype html>
     .pill { display:inline-block; padding: 6px 10px; border-radius:999px; background: rgba(255,255,255,0.06); font-size: 13px; }
     .pill.ok { background: rgba(74,163,255,0.16); color: var(--accent); }
     .pill.bad { background: rgba(255,74,74,0.16); color: var(--danger); }
+
+    button.on { border: 1px solid rgba(74,163,255,0.70); background: rgba(74,163,255,0.20); }
 
     .joyWrap { display:flex; align-items:center; justify-content:center; }
     .joy {
@@ -155,6 +234,7 @@ HTML = r"""<!doctype html>
         <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
           <span id="status" class="pill">Connecting…</span>
           <span id="safety" class="pill">Deadman…</span>
+          <span id="mode" class="pill">Mode…</span>
           <span class="pill">Update: <span id="hz">0</span> Hz</span>
         </div>
         <div class="joyWrap" style="margin-top: 14px;">
@@ -165,6 +245,7 @@ HTML = r"""<!doctype html>
         </div>
         <div class="btnRow">
           <button id="stop" class="stop">STOP</button>
+          <button id="selfdrive">Self drive</button>
           <button id="slow">Max 30%</button>
           <button id="med">Max 60%</button>
           <button id="fast">Max 90%</button>
@@ -203,7 +284,9 @@ HTML = r"""<!doctype html>
   const knob = document.getElementById('knob');
   const status = document.getElementById('status');
   const safety = document.getElementById('safety');
+  const modePill = document.getElementById('mode');
   const hzEl = document.getElementById('hz');
+  const selfDriveBtn = document.getElementById('selfdrive');
 
   let maxMag = 0.6;
   let active = false;
@@ -214,6 +297,7 @@ HTML = r"""<!doctype html>
   let lastSend = 0;
   let sentCount = 0;
   let lastHzTs = performance.now();
+  let mode = 'joystick'; // joystick | selfdrive
 
   function setStatus(ok, text) {
     status.textContent = text;
@@ -225,7 +309,35 @@ HTML = r"""<!doctype html>
     safety.className = ok ? 'pill ok' : 'pill bad';
   }
 
+  function setMode(text, ok=true) {
+    modePill.textContent = text;
+    modePill.className = ok ? 'pill ok' : 'pill bad';
+  }
+
+  function applySelfDriveButton() {
+    const on = mode === 'selfdrive';
+    selfDriveBtn.classList.toggle('on', on);
+    selfDriveBtn.textContent = on ? 'Self drive: ON' : 'Self drive';
+    setMode('Mode: ' + (on ? 'Self drive' : 'Joystick'), true);
+  }
+
+  async function setSelfDrive(on) {
+    // Stop any manual sending immediately.
+    await stop();
+    try {
+      const url = on ? '/api/selfdrive/start' : '/api/selfdrive/stop';
+      const res = await fetch(url + location.search, { method: 'POST' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      mode = on ? 'selfdrive' : 'joystick';
+      applySelfDriveButton();
+    } catch (e) {
+      setStatus(false, 'Disconnected');
+      setMode('Mode: error', false);
+    }
+  }
+
   async function send(throttle, steering) {
+    if (mode !== 'joystick') return;
     const now = performance.now();
     // ~20Hz
     if (now - lastSend < 50) return;
@@ -263,9 +375,11 @@ HTML = r"""<!doctype html>
     desiredSteering = 0;
     knob.style.left = '50%';
     knob.style.top = '50%';
-    try {
-      await fetch('/api/stop' + location.search, { method: 'POST' });
-    } catch (_) {}
+    if (mode === 'joystick') {
+      try {
+        await fetch('/api/stop' + location.search, { method: 'POST' });
+      } catch (_) {}
+    }
   }
 
   function ensureSendLoop() {
@@ -326,6 +440,7 @@ HTML = r"""<!doctype html>
   }
 
   joy.addEventListener('pointerdown', (e) => {
+    if (mode !== 'joystick') return;
     active = true;
     joy.setPointerCapture(e.pointerId);
     ensureSendLoop();
@@ -341,6 +456,8 @@ HTML = r"""<!doctype html>
   joy.addEventListener('pointercancel', stop);
 
   document.getElementById('stop').addEventListener('click', stop);
+  selfDriveBtn.addEventListener('click', () => setSelfDrive(mode !== 'selfdrive'));
+  applySelfDriveButton();
 
   bindHoldButton(document.getElementById('fwd'),  1.0,  0.0);
   bindHoldButton(document.getElementById('rev'), -1.0,  0.0);
@@ -373,6 +490,10 @@ HTML = r"""<!doctype html>
       const res = await fetch('/api/status' + location.search);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const s = await res.json();
+      if (s.mode) {
+        mode = s.mode;
+        applySelfDriveButton();
+      }
       if (s.last_cmd_age_s == null) {
         setSafety(false, 'Deadman: idle');
       } else if (s.last_cmd_age_s > s.deadman_s) {
@@ -408,11 +529,11 @@ def api_drive():
     throttle = float(data.get("throttle", 0.0))
     steering = float(data.get("steering", 0.0))
 
-    global _last_cmd_ts, _last_throttle, _last_steering
-    with _state_lock:
-        _last_cmd_ts = time.time()
-        _last_throttle = throttle
-        _last_steering = steering
+    global _mode
+    # Manual input takes control immediately.
+    _stop_selfdrive()
+    _mode = "joystick"
+    _heartbeat_cmd(throttle, steering)
 
     controller.drive_arcade(throttle, steering)
     return jsonify(ok=True)
@@ -422,11 +543,34 @@ def api_drive():
 def api_stop():
     if not _check_token():
         return Response("Unauthorized\n", status=401)
-    global _last_cmd_ts, _last_throttle, _last_steering
-    with _state_lock:
-        _last_cmd_ts = time.time()
-        _last_throttle = 0.0
-        _last_steering = 0.0
+    global _mode
+    _stop_selfdrive()
+    _mode = "joystick"
+    _heartbeat_cmd(0.0, 0.0)
+    controller.stop()
+    return jsonify(ok=True)
+
+
+@app.post("/api/selfdrive/start")
+def api_selfdrive_start():
+    if not _check_token():
+        return Response("Unauthorized\n", status=401)
+    global _mode
+    controller.stop()
+    _mode = "selfdrive"
+    _heartbeat_cmd(0.0, 0.0)
+    _start_selfdrive()
+    return jsonify(ok=True)
+
+
+@app.post("/api/selfdrive/stop")
+def api_selfdrive_stop():
+    if not _check_token():
+        return Response("Unauthorized\n", status=401)
+    global _mode
+    _stop_selfdrive()
+    _mode = "joystick"
+    _heartbeat_cmd(0.0, 0.0)
     controller.stop()
     return jsonify(ok=True)
 
@@ -440,6 +584,10 @@ def api_status():
             deadman_s=DEADMAN_S,
             throttle=_last_throttle,
             steering=_last_steering,
+      mode=_mode,
+      selfdrive_running=_sd_running,
+      selfdrive_mm=_sd_last_mm,
+      selfdrive_state=_sd_last_state,
             max_pwm=MAX_PWM,
             left_mult=LEFT_MULT,
             right_mult=RIGHT_MULT,
@@ -455,6 +603,8 @@ def _deadman_loop():
         if not ts:
             continue
         if time.time() - ts > DEADMAN_S:
+            # If we are not receiving heartbeats, stop everything.
+            _stop_selfdrive()
             controller.stop()
 
 
