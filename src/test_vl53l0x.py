@@ -59,6 +59,7 @@ def _init_sensor(address: int):
         import busio
         import adafruit_vl53l0x
     except Exception as exc:
+        print(f"VL53L0X import error: {exc}")
         raise RuntimeError(
             "Missing dependencies for VL53L0X driver.\n\n"
             "Install:\n"
