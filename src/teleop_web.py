@@ -605,10 +605,10 @@ def api_status():
             deadman_s=DEADMAN_S,
             throttle=_last_throttle,
             steering=_last_steering,
-          mode=_mode,
-          selfdrive_running=_sd_running,
-          selfdrive_mm=_sd_last_mm,
-          selfdrive_state=_sd_last_state,
+            mode=_mode,
+            selfdrive_running=_sd_running,
+            selfdrive_mm=_sd_last_mm,
+            selfdrive_state=_sd_last_state,
             max_pwm=MAX_PWM,
             left_mult=LEFT_MULT,
             right_mult=RIGHT_MULT,
@@ -617,7 +617,7 @@ def api_status():
 
 def _deadman_loop(stop_event: Event):
     global _last_cmd_ts
-  while not stop_event.is_set():
+    while not stop_event.is_set():
         time.sleep(0.05)
         with _state_lock:
             ts = _last_cmd_ts
