@@ -1,15 +1,23 @@
-Below is a **README-style version** of your design doc, rewritten for a repo audience, with **clearer structure and improved ASCII diagrams** (still plain text / Markdown-friendly, no RTF).
-
-You can drop this directly into `README.md`.
-
----
-
 # Raspberry Pi Zero 2 W – 2WD Robot Base
 
-A stable, production-quality baseline for a **2-wheel drive robot** using a Raspberry Pi Zero 2 W and a TB6612FNG motor driver.
-This repository establishes a **reliable drivetrain and teleoperation layer** before adding sensors, autonomy, or AI.
+A stable baseline for a **2-wheel drive robot** using a Raspberry Pi Zero 2 W and a TB6612FNG motor driver.
+
+This repo is currently focused on **reliable drivetrain + teleop**. Sensors/autonomy are the next phase.
 
 ---
+
+## Progress (Current State)
+
+- Deterministic TB6612 control via a reusable motor module: [src/motor_controller.py](src/motor_controller.py)
+- Wi‑Fi teleop web UI (phone friendly) with:
+    - Deadman stop on the server
+    - Continuous “hold to drive” controls (keeps motion going while pressed)
+    - On-page deadman status indicator (low-frequency polling)
+    - Control mode toggle: joystick vs autonomous
+    - Safe shutdown: motors stop + TB6612 standby on exit
+    - File: [src/teleop_web.py](src/teleop_web.py)
+- Interactive keyboard teleop (separate script): [src/teleop_interactive.py](src/teleop_interactive.py)
+
 
 ## Project Goals
 
@@ -211,26 +219,21 @@ The `gpiozero.Motor` abstraction is **not used** due to:
 * Left / right turns
 * Interactive keyboard teleoperation
 * Wi‑Fi teleoperation from phone/browser (see below)
-* Stable power behavior
-* Deterministic motor response
-* Clean, documented wiring
+* Deadman safety stop (server-side)
+* Hold-to-drive buttons (continuous motion while held)
+* Safer stop on exit (stop + standby)
+* Less jerky motion via a simple slew-rate limiter in the motor controller
 
 ---
 
-## Repository Structure (Suggested)
+## Repository Structure
 
 ```
-robo/
-├── drive_test.py          # Deterministic motion test
-├── teleop_interactive.py  # Keyboard control
-├── teleop_web.py          # Wi‑Fi control (browser/iOS)
-├── motor.py               # Future MotorController class
-├── sensors/
-│   └── vl53l0x.py
-├── vision/
-│   └── camera.py
-└── docs/
-    └── design.md
+src/
+    motor_controller.py
+    teleop_interactive.py
+    teleop_web.py
+    readme.md
 ```
 
 ---
@@ -241,12 +244,35 @@ robo/
 
 * Left/right speed trim
 * Straight-line calibration
-* Acceleration ramping
+* Acceleration ramping (implemented as a basic slew-rate limiter; tune/iterate)
 
 ### Phase 3 – Sensors
 
-* VL53L0X distance sensor
+* Add proximity sensor support (ultrasonic / ToF)
 * Obstacle stop / slow-down logic
+
+---
+
+## Autonomous Mode (Web UI)
+
+The web UI now includes a **Control mode** toggle:
+
+- **Joystick**: normal teleop.
+- **Autonomous**: runs a conservative background “wander” loop (forward + turn) using the same motor controller.
+
+Autonomy is designed to be extended with real sensors later; the implementation lives in:
+
+- [src/autonomous.py](src/autonomous.py)
+
+### Autonomy Tuning
+
+Optional environment variables:
+
+- `AUTO_SPEED` (0..1, default `0.25`)
+- `AUTO_TURN` (0..1, default `0.55`)
+- `AUTO_FWD_S` (seconds, default `1.2`)
+- `AUTO_TURN_S` (seconds, default `0.55`)
+- `AUTO_JITTER_S` (seconds, default `0.15`)
 
 ### Phase 4 – Vision & AI
 
@@ -270,7 +296,7 @@ sudo apt install -y python3-flask
 ### Run
 
 ```bash
-python3 teleop_web.py
+python3 src/teleop_web.py
 ```
 
 Then on your iPhone (same Wi‑Fi), open Safari to:
@@ -287,13 +313,19 @@ Tip: Safari → Share → **Add to Home Screen** for a full-screen controller.
 - Set a conservative max PWM (recommended on a phone):
 
 ```bash
-MAX_PWM=0.6 python3 teleop_web.py
+MAX_PWM=0.6 python3 src/teleop_web.py
 ```
+
+Other useful env vars:
+
+- `DEADMAN_S` (seconds, default `0.35`)
+- `LEFT_MULT`, `RIGHT_MULT` (motor trim)
+- `TELEOP_TOKEN` (optional auth)
 
 ### Optional: Simple token
 
 ```bash
-TELEOP_TOKEN=changeme python3 teleop_web.py
+TELEOP_TOKEN=changeme python3 src/teleop_web.py
 ```
 
 Then open:
