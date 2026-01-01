@@ -70,6 +70,10 @@ _sd_running = False
 _sd_last_mm: int | None = None
 _sd_last_state: str | None = None
 
+# Process shutdown coordination (prevents daemon-thread issues at interpreter finalization)
+_shutdown_event = Event()
+_deadman_thread = None
+
 # Safety / tuning
 DEADMAN_S = _env_float("DEADMAN_S", 0.35)
 MAX_PWM = _env_float("MAX_PWM", 0.6)  # keep it conservative for phone control
@@ -144,6 +148,10 @@ def _start_selfdrive():
 
 def _safe_shutdown():
   try:
+    _shutdown_event.set()
+  except Exception:
+    pass
+  try:
     _stop_selfdrive()
   except Exception:
     pass
@@ -156,12 +164,25 @@ def _safe_shutdown():
     except Exception:
         pass
 
+    global _deadman_thread
+    thr = _deadman_thread
+    _deadman_thread = None
+    if thr is not None:
+      try:
+        thr.join(timeout=1.5)
+      except Exception:
+        pass
+
 
 atexit.register(_safe_shutdown)
 
 
 def _handle_sigterm(_signum, _frame):
     # Ensure we stop/disable before exiting on service shutdown.
+  try:
+    _shutdown_event.set()
+  except Exception:
+    pass
     _safe_shutdown()
     raise SystemExit(0)
 
@@ -584,19 +605,19 @@ def api_status():
             deadman_s=DEADMAN_S,
             throttle=_last_throttle,
             steering=_last_steering,
-      mode=_mode,
-      selfdrive_running=_sd_running,
-      selfdrive_mm=_sd_last_mm,
-      selfdrive_state=_sd_last_state,
+          mode=_mode,
+          selfdrive_running=_sd_running,
+          selfdrive_mm=_sd_last_mm,
+          selfdrive_state=_sd_last_state,
             max_pwm=MAX_PWM,
             left_mult=LEFT_MULT,
             right_mult=RIGHT_MULT,
         )
 
 
-def _deadman_loop():
+def _deadman_loop(stop_event: Event):
     global _last_cmd_ts
-    while True:
+  while not stop_event.is_set():
         time.sleep(0.05)
         with _state_lock:
             ts = _last_cmd_ts
@@ -617,7 +638,9 @@ def main():
         # Not all platforms support SIGTERM/signal handling the same way.
         pass
 
-    threading.Thread(target=_deadman_loop, daemon=True).start()
+    global _deadman_thread
+    _deadman_thread = threading.Thread(target=_deadman_loop, args=(_shutdown_event,), daemon=False)
+    _deadman_thread.start()
 
     host = os.environ.get("HOST", "0.0.0.0")
     port = _env_int("PORT", 8080)
